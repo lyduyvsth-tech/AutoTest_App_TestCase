@@ -1,0 +1,16 @@
+# Maven
+target/
+
+# IDE - IntelliJ
+.idea/
+*.iml
+
+# IDE - Eclipse
+.settings/
+.project
+.classpath
+bin/
+
+# Hệ thống
+.DS_Store
+Thumbs.db
