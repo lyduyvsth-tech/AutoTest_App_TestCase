@@ -6,25 +6,43 @@ from appium.options.android import UiAutomator2Options
 from appium.webdriver.common.appiumby import AppiumBy
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
 
-# 1. THIẾT LẬP HỆ THỐNG
-save_path = r"D:\Ảnh Test App"
+# ==============================================================================
+# 1. CẤU HÌNH HỆ THỐNG (TỐI ƯU CAPS)
+# ==============================================================================
+save_path = r"D:\Ket Qua Test App"
 if not os.path.exists(save_path): os.makedirs(save_path)
 
+print(">>> Đang khởi tạo Appium Driver...")
 options = UiAutomator2Options()
 options.platform_name = 'Android'
 options.app_package = 'com.tuananh15352.appqly'
 options.app_activity = '.MainActivity'
 options.no_reset = True
-# Tối ưu khởi động
 options.set_capability("skipDeviceInitialization", True)
 options.set_capability("skipServerInstallation", True)
+options.set_capability("newCommandTimeout", 300)
+# [TỐI ƯU MỚI] Chặn bàn phím ảo hiện lên -> Tăng tốc độ nhập liệu cực nhanh
+options.set_capability("unicodeKeyboard", True) 
+options.set_capability("resetKeyboard", True)
 
 driver = webdriver.Remote("http://127.0.0.1:4723", options=options)
-wait = WebDriverWait(driver, 10)
-final_results = []
+wait = WebDriverWait(driver, 5)
 
-# 2. DANH SÁCH 20 KỊCH BẢN KIỂM THỬ
+# Locators (Định nghĩa sẵn để dùng lại)
+LOC_EMAIL = (AppiumBy.XPATH, '//android.widget.EditText[@index="5"]')
+LOC_PASS  = (AppiumBy.XPATH, '//android.widget.EditText[@index="7"]')
+LOC_ANY_INPUT = (AppiumBy.XPATH, "//android.widget.EditText")
+
+# XPath tìm lỗi
+keywords = ["không được để trống", "không hợp lệ", "phải từ 6 ký tự", "tồn tại", "sai"]
+xpath_query = " or ".join([f"contains(@text, '{k}')" for k in keywords])
+ERROR_LOCATOR = (AppiumBy.XPATH, f"//android.widget.TextView[{xpath_query}]")
+
+# ==============================================================================
+# 2. DỮ LIỆU TEST CASE
+# ==============================================================================
 test_scenarios = [
     {"id": "01", "name": "Đăng nhập thành công", "email": "admin@gmail.com", "pass": "123456", "exp": "home"},
     {"id": "02", "name": "Để trống Email", "email": "", "pass": "123456", "exp": "login"},
@@ -48,73 +66,139 @@ test_scenarios = [
     {"id": "20", "name": "Tên miền không tồn tại", "email": "admin@test.xyz123", "pass": "123456", "exp": "login"}
 ]
 
-def run_test(case):
-    print(f"\n>>> Thực thi Case {case['id']}: {case['name']}")
-    status, note = "FAIL ❌", ""
+final_results = []
+
+# ==============================================================================
+# 3. HÀM HỖ TRỢ (Non-Blocking)
+# ==============================================================================
+def get_text_safe(locator, timeout=5):
+    """Lấy text nhanh, bỏ qua lỗi Stale"""
+    end_time = time.time() + timeout
+    while time.time() < end_time:
+        try:
+            # Poll every 0.3s instead of default 0.5s for speed
+            el = WebDriverWait(driver, 0.3).until(EC.visibility_of_element_located(locator))
+            txt = el.text
+            if txt: return txt
+        except: continue
+    return ""
+
+def quick_check_login_screen():
+    """Check siêu tốc (0.1s) xem có ô nhập liệu không"""
     try:
-        # Nhập liệu
-        e = wait.until(EC.presence_of_element_located((AppiumBy.XPATH, '//android.widget.EditText[@index="5"]')))
-        p = driver.find_element(AppiumBy.XPATH, '//android.widget.EditText[@index="7"]')
-        e.clear(); e.send_keys(case['email'])
-        p.clear(); p.send_keys(case['pass'])
-        if driver.is_keyboard_shown(): driver.hide_keyboard()
-        
-        driver.tap([(540, 1618)]) # Tọa độ nút Đăng nhập
-        time.sleep(3) 
+        driver.find_element(*LOC_ANY_INPUT)
+        return True
+    except:
+        return False
 
-        # --- LOGIC NHẬN DIỆN LỖI TRỰC QUAN ---
-        # Tìm tất cả TextView để lấy thông báo lỗi thực tế
-        all_texts = driver.find_elements(AppiumBy.CLASS_NAME, "android.widget.TextView")
-        error_msg = ""
-        # Danh sách từ khóa báo lỗi thực tế từ app của bạn
-        keywords = ["không được để trống", "không hợp lệ", "phải từ 6 ký tự"]
-        
-        for t in all_texts:
-            for key in keywords:
-                if key in t.text:
-                    error_msg = t.text # Lấy đúng dòng thông báo đỏ
-                    break
-
-        # Kiểm tra đang ở đâu
-        is_login = len(driver.find_elements(AppiumBy.XPATH, "//*[contains(@text, 'Đăng nhập')]")) > 0
-        actual = "login" if is_login else "home"
-
-        # SO SÁNH THÔNG MINH (ASSERTION)
-        if actual == case['exp']:
-            status = "PASS ✅"
-            note = error_msg if error_msg else "Hệ thống xử lý chính xác"
-        else:
-            status = "FAIL ❌"
-            note = f"BUG: Vẫn có thể {case['exp']} vào app"
-
-        # Chụp ảnh và Reset
-        driver.save_screenshot(os.path.join(save_path, f"{case['id']}_{case['name']}.png"))
-        if actual == "home":
+# ==============================================================================
+# 4. LUỒNG CHẠY CHÍNH (SINGLE-PASS EXECUTION)
+# ==============================================================================
+def run_test_ultra_fast(case):
+    print(f"[{case['id']}] {case['name']}...", end=" ", flush=True)
+    status, note = "FAIL ❌", ""
+    
+    try:
+        # --- BƯỚC 1: NHẬP LIỆU (SELF-HEALING TÍCH HỢP) ---
+        inp_email = None
+        try:
+            # Tìm Email để nhập luôn. Nếu thấy -> Gán vào biến.
+            inp_email = WebDriverWait(driver, 2).until(EC.presence_of_element_located(LOC_EMAIL))
+        except:
+            # Nếu không thấy (Wait 2s) -> Restart App -> Tìm lại
+            # print("♻️", end="")
             driver.terminate_app('com.tuananh15352.appqly')
             driver.activate_app('com.tuananh15352.appqly')
-            wait.until(EC.presence_of_element_located((AppiumBy.XPATH, '//android.widget.EditText[@index="5"]')))
+            inp_email = wait.until(EC.presence_of_element_located(LOC_EMAIL))
+        
+        # Nhập Email (Dùng biến đã tìm thấy, không tìm lại)
+        inp_email.clear()
+        if case['email']: inp_email.send_keys(case['email'])
+        
+        # Nhập Pass (Tìm trực tiếp vì Email đã có thì Pass chắc chắn có)
+        inp_pass = driver.find_element(*LOC_PASS)
+        inp_pass.clear()
+        if case['pass']: inp_pass.send_keys(case['pass'])
+        
+        # Không cần hide_keyboard() nữa vì đã dùng unicodeKeyboard
+        
+        # Click Đăng nhập
+        driver.tap([(540, 1618)]) 
 
-    except Exception as err:
-        note = f"Lỗi kỹ thuật: {str(err)[:40]}"
-    
+        # --- BƯỚC 2: KIỂM TRA KẾT QUẢ ---
+        actual_result = "unknown"
+        error_msg = ""
+
+        if case['exp'] == 'login':
+            # Ưu tiên bắt lỗi trước
+            error_msg = get_text_safe(ERROR_LOCATOR, timeout=6) # Giảm timeout xuống 6s
+            if error_msg:
+                actual_result = "login"
+            else:
+                # Nếu không lỗi, check xem có còn ô nhập liệu không
+                if quick_check_login_screen():
+                    actual_result = "login" # Vẫn ở trang login nhưng ko bắt được text lỗi
+                else:
+                    actual_result = "home"
+        else:
+            # Mong đợi vào Home
+            try:
+                wait.until(EC.invisibility_of_element_located(LOC_ANY_INPUT))
+                actual_result = "home"
+            except TimeoutException:
+                actual_result = "login"
+
+        # --- BƯỚC 3: ĐÁNH GIÁ ---
+        if actual_result == case['exp']:
+            status = "PASS ✅"
+            note = error_msg if error_msg else "OK"
+        else:
+            status = "FAIL ❌"
+            if case['exp'] == 'login' and actual_result == 'home':
+                note = "BUG: Login được dù sai data"
+            else:
+                note = f"Mong: {case['exp']} - Thực: {actual_result}"
+
+        print(f"-> {status}")
+
+        # --- BƯỚC 4: RESET ---
+        if actual_result == "home":
+            driver.terminate_app('com.tuananh15352.appqly')
+            driver.activate_app('com.tuananh15352.appqly')
+
+    except Exception as e:
+        print(f"-> ERR: {str(e)[:30]}")
+        status = "ERROR ⚠️"
+        note = str(e)
+        try:
+            driver.terminate_app('com.tuananh15352.appqly')
+            driver.activate_app('com.tuananh15352.appqly')
+        except: pass
+
     final_results.append({"STT": case['id'], "Kịch bản": case['name'], "Kết quả": status, "Ghi chú": note})
 
-# 3. THỰC THI & TỔNG KẾT
+# ==============================================================================
+# 5. THỰC THI
+# ==============================================================================
 try:
-    for s in test_scenarios: run_test(s)
+    start_time = time.time()
+    for s in test_scenarios: 
+        run_test_ultra_fast(s)
     
-    # Xuất file Excel (.csv) chuẩn tiếng Việt
-    report_file = os.path.join(save_path, "BaoCao_Test_Login.csv")
+    duration = time.time() - start_time
+    
+    report_file = os.path.join(save_path, "BaoCao_Ultra_Fast.csv")
     with open(report_file, mode='w', newline='', encoding='utf-8-sig') as f:
-        w = csv.DictWriter(f, fieldnames=["STT", "Kịch bản", "Kết quả", "Ghi chú"])
+        fieldnames = ["STT", "Kịch bản", "Kết quả", "Ghi chú"]
+        w = csv.DictWriter(f, fieldnames=fieldnames)
         w.writeheader()
         w.writerows(final_results)
-        # Ghi thống kê
-        total = len(final_results)
+        
         passes = sum(1 for x in final_results if "PASS" in x["Kết quả"])
         csv.writer(f).writerow([])
-        csv.writer(f).writerow(["TỔNG CỘNG", f"PASS: {passes}", f"FAIL: {total-passes}", f"TỶ LỆ: {(passes/total)*100:.1f}%"])
+        csv.writer(f).writerow(["TỔNG", f"{duration:.1f}s", f"PASS: {passes}/{len(final_results)}"])
 
-    print(f"\n✅ Đã hoàn thành! Báo cáo tại: {report_file}")
+    print(f"\n✅ XONG! Time: {duration:.1f}s - File: {report_file}")
+
 finally:
     driver.quit()
